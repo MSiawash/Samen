@@ -14,8 +14,17 @@ import {
   Share,
   StyleSheet,
   Platform,
+  Modal,
 } from 'react-native';
-import { collection, onSnapshot } from 'firebase/firestore';
+import {
+  collection,
+  onSnapshot,
+  doc,
+  updateDoc,
+  deleteDoc,
+  query,
+  orderBy,
+} from 'firebase/firestore';
 import { db, auth } from './firebaseConfig';
 import Slider from '@react-native-community/slider';
 
@@ -24,6 +33,12 @@ const TEAL = '#2A9D8F';
 const ROOD_ZACHT = '#E76F51';
 const ACHTERGROND = '#F5F5F0';
 const WIT = '#FFFFFF';
+
+// Categorie-filter pas tonen vanaf dit aantal contacten
+const TOON_FILTER_VANAF = 5;
+
+// Categorieën (zonder "Alle"; die is alleen een filter-keuze)
+const CATEGORIEEN = ['Familie & Naasten', 'Vrienden & Buren', 'Activiteiten', 'Zorg & Hulp'];
 
 // --- Afstanden voor zoekfunctie ---
 const afstanden = [0, 1, 3, 5, 10, 20, 31, 40, 50, 'Max'];
@@ -60,6 +75,11 @@ const FALLBACK_CONTACTEN = [
   },
 ];
 
+// --- Demo verzonden verzoeken (later via Firebase) ---
+const FALLBACK_VERZOEKEN = [
+  { id: 'v1', naam: 'Jorinde Linn', status: 'Wacht op reactie' },
+];
+
 const schaduw = Platform.select({
   ios: {
     shadowColor: '#000',
@@ -77,8 +97,9 @@ const schaduw = Platform.select({
 });
 
 // --- Contact Card ---
-function ContactCard({ contact, onToggle }) {
+function ContactCard({ contact, onToggle, onBewerken }) {
   const korteNaam = contact.naam.split(' (')[0];
+  const heeftTelefoon = !!contact.telefoon;
 
   return (
     <View style={[styles.card, !contact.ingecheckt && styles.cardWaarschuwing]}>
@@ -90,7 +111,12 @@ function ContactCard({ contact, onToggle }) {
           accessible
           accessibilityLabel={`Foto van ${contact.naam}`}
         />
-        <Text style={styles.contactNaam}>{contact.naam}</Text>
+        <View style={styles.contactNaamBlok}>
+          <Text style={styles.contactNaam}>{contact.naam}</Text>
+          {contact.categorie && (
+            <Text style={styles.contactCategorie}>{contact.categorie}</Text>
+          )}
+        </View>
         <Text style={styles.contactMood}>{contact.mood || '⚪'}</Text>
       </View>
 
@@ -101,7 +127,9 @@ function ContactCard({ contact, onToggle }) {
         ) : (
           <Text style={styles.statusWaarschuwing}>⚠️ Nog niet ingecheckt</Text>
         )}
-        <Text style={styles.checkInTijd}>{contact.laatsteCheckIn}</Text>
+        {contact.laatsteCheckIn && (
+          <Text style={styles.checkInTijd}>{contact.laatsteCheckIn}</Text>
+        )}
       </View>
 
       {/* Noodknoppen bij niet ingecheckt */}
@@ -117,18 +145,20 @@ function ContactCard({ contact, onToggle }) {
           >
             <Text style={styles.belKnopTekst}>📞 Bel {korteNaam}</Text>
           </TouchableOpacity>
-          <TouchableOpacity
-            style={styles.noodKnop}
-            activeOpacity={0.7}
-            onPress={() => Linking.openURL(`tel:${contact.noodnummer}`)}
-            accessible
-            accessibilityRole="button"
-            accessibilityLabel={`Bel noodcontact ${contact.naam_noodcontact}`}
-          >
-            <Text style={styles.noodKnopTekst}>
-              🚨 Bel Noodcontact ({contact.naam_noodcontact})
-            </Text>
-          </TouchableOpacity>
+          {contact.noodnummer && (
+            <TouchableOpacity
+              style={styles.noodKnop}
+              activeOpacity={0.7}
+              onPress={() => Linking.openURL(`tel:${contact.noodnummer}`)}
+              accessible
+              accessibilityRole="button"
+              accessibilityLabel={`Bel noodcontact ${contact.naam_noodcontact}`}
+            >
+              <Text style={styles.noodKnopTekst}>
+                🚨 Bel Noodcontact ({contact.naam_noodcontact})
+              </Text>
+            </TouchableOpacity>
+          )}
         </View>
       )}
 
@@ -149,12 +179,38 @@ function ContactCard({ contact, onToggle }) {
         </View>
       )}
 
+      {/* Actieknoppen onderaan */}
+      <View style={styles.actieRij}>
+        {heeftTelefoon && contact.ingecheckt && (
+          <TouchableOpacity
+            style={[styles.actieKnop, styles.actieKnopPrimair]}
+            activeOpacity={0.7}
+            onPress={() => Linking.openURL(`tel:${contact.telefoon}`)}
+            accessible
+            accessibilityRole="button"
+            accessibilityLabel={`Bel ${korteNaam}`}
+          >
+            <Text style={styles.actieKnopTekstPrimair}>📞 Bellen</Text>
+          </TouchableOpacity>
+        )}
+        <TouchableOpacity
+          style={[styles.actieKnop, styles.actieKnopSecundair]}
+          activeOpacity={0.7}
+          onPress={() => onBewerken?.(contact)}
+          accessible
+          accessibilityRole="button"
+          accessibilityLabel={`Bewerk ${korteNaam}`}
+        >
+          <Text style={styles.actieKnopTekstSecundair}>✏️ Bewerken</Text>
+        </TouchableOpacity>
+      </View>
+
       {/* Deel-instellingen (niet voor zakelijke contacten) */}
       {!contact.details && (
         <View style={styles.deelBlok}>
           <View style={styles.switchRij}>
             <View style={styles.switchTekstBlok}>
-              <Text style={styles.switchTitel}>Mijn stemming delen</Text>
+              <Text style={styles.switchTitel}>Hoe ik mij voel delen</Text>
               <Text style={styles.switchSubtitel}>
                 De ander ziet de zon, wolk of regen die u vandaag heeft gekozen.
               </Text>
@@ -170,7 +226,7 @@ function ContactCard({ contact, onToggle }) {
           </View>
           <View style={styles.switchRij}>
             <View style={styles.switchTekstBlok}>
-              <Text style={styles.switchTitel}>Mijn veiligheid delen</Text>
+              <Text style={styles.switchTitel}>Alarmeren</Text>
               <Text style={styles.switchSubtitel}>
                 De ander krijgt een seintje als u zich 's ochtends niet op tijd heeft gemeld.
               </Text>
@@ -190,211 +246,113 @@ function ContactCard({ contact, onToggle }) {
   );
 }
 
-// --- Hoofdscherm ---
-export default function ContactenScreen() {
-  const [actieveTab, setActieveTab] = useState('mijn');
-  const [contacten, setContacten] = useState([]);
-  const [isLaden, setIsLaden] = useState(true);
-  const [actieveCategorie, setActieveCategorie] = useState('Alle');
-
-  // Real-time contacten ophalen via onSnapshot
-  useEffect(() => {
-    const user = auth.currentUser;
-    if (!user) {
-      setContacten(FALLBACK_CONTACTEN);
-      setIsLaden(false);
-      return;
-    }
-
-    let geladen = false;
-    const timeout = setTimeout(() => {
-      if (!geladen) {
-        geladen = true;
-        setContacten(FALLBACK_CONTACTEN);
-        setIsLaden(false);
-      }
-    }, 4000);
-
-    const contactenRef = collection(db, 'profiles', user.uid, 'contacten');
-    const unsubscribe = onSnapshot(
-      contactenRef,
-      (snapshot) => {
-        if (geladen) return;
-        geladen = true;
-        clearTimeout(timeout);
-        const data = snapshot.docs.map((d) => ({ id: d.id, ...d.data() }));
-        setContacten(data.length > 0 ? data : FALLBACK_CONTACTEN);
-        setIsLaden(false);
-      },
-      (err) => {
-        if (geladen) return;
-        geladen = true;
-        clearTimeout(timeout);
-        console.warn('Contacten laden mislukt:', err);
-        setContacten(FALLBACK_CONTACTEN);
-        setIsLaden(false);
-      }
-    );
-
-    return () => {
-      clearTimeout(timeout);
-      unsubscribe();
-    };
-  }, []);
-
-  const categorieen = ['Alle', 'Familie & Naasten', 'Vrienden & Buren', 'Activiteiten', 'Zorg & Hulp'];
-
-  const gefilterdeContacten = actieveCategorie === 'Alle'
-    ? contacten
-    : contacten.filter((c) => c.categorie === actieveCategorie);
-
-  // Zoeken op nummer
-  const [zoekNummer, setZoekNummer] = useState('');
-  const [isZoeken, setIsZoeken] = useState(false);
-
-  // Radar zoeken
-  const [postcode, setPostcode] = useState('');
-  const [afstandIndex, setAfstandIndex] = useState(3);
-
-  function toggleDeelInstelling(contactId, veld, waarde) {
-    setContacten((prev) =>
-      prev.map((c) => (c.id === contactId ? { ...c, [veld]: waarde } : c))
-    );
-  }
-
-  async function nodigUit() {
-    try {
-      await Share.share({
-        message:
-          'Hoi! Ik gebruik de Samen-app om in contact te blijven met de buurt. Doe je ook mee? Download hem hier: [URL_KOMT_LATER]',
-      });
-    } catch (e) {
-      console.warn('Delen mislukt:', e);
-    }
-  }
-
-  function zoekOpNummer() {
-    if (!zoekNummer.trim() || isZoeken) return;
-    setIsZoeken(true);
-    // Simuleer zoekactie
-    setTimeout(() => {
-      Alert.alert(
-        'Niet gevonden',
-        'Dit nummer is nog niet bekend bij DAG. Vraag uw contactpersoon om eerst de gratis app te downloaden.'
-      );
-      setIsZoeken(false);
-    }, 800);
-  }
-
+// --- Modal: Contact toevoegen ---
+function VoegContactToeModal({
+  zichtbaar,
+  stap,
+  setStap,
+  onSluit,
+  onUitnodig,
+  zoekNummer,
+  setZoekNummer,
+  isZoeken,
+  zoekOpNummer,
+  postcode,
+  setPostcode,
+  afstandIndex,
+  setAfstandIndex,
+}) {
   return (
-    <View style={styles.scherm}>
-      {/* Tab knoppen */}
-      <View style={styles.toggleBar}>
-        <TouchableOpacity
-          style={[styles.toggleKnop, actieveTab === 'mijn' && styles.toggleActief]}
-          activeOpacity={0.7}
-          onPress={() => setActieveTab('mijn')}
-          accessible
-          accessibilityRole="tab"
-          accessibilityState={{ selected: actieveTab === 'mijn' }}
-        >
-          <Text style={[styles.toggleTekst, actieveTab === 'mijn' && styles.toggleTekstActief]}>
-            Mijn contacten
-          </Text>
-        </TouchableOpacity>
-        <TouchableOpacity
-          style={[styles.toggleKnop, actieveTab === 'zoeken' && styles.toggleActief]}
-          activeOpacity={0.7}
-          onPress={() => setActieveTab('zoeken')}
-          accessible
-          accessibilityRole="tab"
-          accessibilityState={{ selected: actieveTab === 'zoeken' }}
-        >
-          <Text style={[styles.toggleTekst, actieveTab === 'zoeken' && styles.toggleTekstActief]}>
-            Contacten zoeken
-          </Text>
-        </TouchableOpacity>
-      </View>
+    <Modal
+      visible={zichtbaar}
+      animationType="slide"
+      transparent
+      onRequestClose={onSluit}
+    >
+      <View style={styles.modalAchtergrond}>
+        <View style={styles.modalVel}>
+          {/* Kop met sluitknop */}
+          <View style={styles.modalKop}>
+            <Text style={styles.modalTitel}>
+              {stap === 'keuze' && 'Contact toevoegen'}
+              {stap === 'nummer' && 'Zoek op telefoonnummer'}
+              {stap === 'buurt' && 'Zoek in de buurt'}
+            </Text>
+            <TouchableOpacity
+              onPress={onSluit}
+              accessible
+              accessibilityRole="button"
+              accessibilityLabel="Sluiten"
+              hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
+            >
+              <Text style={styles.modalSluitTekst}>✕</Text>
+            </TouchableOpacity>
+          </View>
 
-      {/* ========== TAB: MIJN CONTACTEN ========== */}
-      {actieveTab === 'mijn' && isLaden && (
-        <View style={styles.laadScherm}>
-          <ActivityIndicator size="large" color={TEAL} />
-          <Text style={styles.laadTekst}>Contacten laden...</Text>
-        </View>
-      )}
-      {actieveTab === 'mijn' && !isLaden && (
-        <>
-          <FlatList
-            data={gefilterdeContacten}
-            keyExtractor={(item) => item.id}
-            renderItem={({ item }) => (
-              <ContactCard contact={item} onToggle={toggleDeelInstelling} />
-            )}
-            contentContainerStyle={styles.lijstContent}
-            showsVerticalScrollIndicator={false}
-            ListHeaderComponent={
+          <ScrollView contentContainerStyle={styles.modalInhoud}>
+            {stap === 'keuze' && (
               <>
                 <TouchableOpacity
-                  style={styles.uitnodigKnop}
+                  style={styles.keuzeKnop}
                   activeOpacity={0.7}
-                  onPress={nodigUit}
+                  onPress={() => {
+                    onSluit();
+                    onUitnodig();
+                  }}
                   accessible
                   accessibilityRole="button"
-                  accessibilityLabel="Nodig een vriend of buur uit"
+                  accessibilityLabel="Nodig een vriend of buur uit via bericht"
                 >
-                  <Text style={styles.uitnodigIcoon}>💌</Text>
-                  <Text style={styles.uitnodigTekst}>Nodig een vriend of buur uit</Text>
+                  <Text style={styles.keuzeIcoon}>💌</Text>
+                  <View style={styles.keuzeTekstBlok}>
+                    <Text style={styles.keuzeTitel}>Uitnodigen via bericht</Text>
+                    <Text style={styles.keuzeUitleg}>
+                      Stuur een vriend of buur een berichtje om mee te doen.
+                    </Text>
+                  </View>
                 </TouchableOpacity>
-                <ScrollView
-                  horizontal
-                  showsHorizontalScrollIndicator={false}
-                  style={styles.filterScroll}
-                  contentContainerStyle={styles.filterContent}
-                >
-                  {categorieen.map((cat) => (
-                    <TouchableOpacity
-                      key={cat}
-                      style={[styles.filterPill, actieveCategorie === cat && styles.filterPillActief]}
-                      activeOpacity={0.7}
-                      onPress={() => setActieveCategorie(cat)}
-                      accessible
-                      accessibilityRole="button"
-                      accessibilityState={{ selected: actieveCategorie === cat }}
-                      accessibilityLabel={`Filter: ${cat}`}
-                    >
-                      <Text style={[styles.filterPillTekst, actieveCategorie === cat && styles.filterPillTekstActief]}>
-                        {cat}
-                      </Text>
-                    </TouchableOpacity>
-                  ))}
-                </ScrollView>
-              </>
-            }
-            ListEmptyComponent={
-              <View style={styles.leegBlok}>
-                <Text style={styles.leegTekst}>Geen contacten in deze categorie.</Text>
-              </View>
-            }
-          />
-        </>
-      )}
 
-      {/* ========== TAB: CONTACTEN ZOEKEN ========== */}
-      {actieveTab === 'zoeken' && (
-        <FlatList
-          data={[]}
-          keyExtractor={() => 'empty'}
-          renderItem={null}
-          ListHeaderComponent={
-            <View>
-              {/* Zoek op telefoonnummer */}
-              <View style={styles.card}>
-                <Text style={styles.sectieKaartTitel}>Zoek op telefoonnummer</Text>
-                <Text style={styles.zoekUitleg}>
+                <TouchableOpacity
+                  style={styles.keuzeKnop}
+                  activeOpacity={0.7}
+                  onPress={() => setStap('nummer')}
+                  accessible
+                  accessibilityRole="button"
+                  accessibilityLabel="Zoek op telefoonnummer"
+                >
+                  <Text style={styles.keuzeIcoon}>📞</Text>
+                  <View style={styles.keuzeTekstBlok}>
+                    <Text style={styles.keuzeTitel}>Zoek op telefoonnummer</Text>
+                    <Text style={styles.keuzeUitleg}>
+                      Vul het mobiele nummer in van iemand die de app al gebruikt.
+                    </Text>
+                  </View>
+                </TouchableOpacity>
+
+                <TouchableOpacity
+                  style={styles.keuzeKnop}
+                  activeOpacity={0.7}
+                  onPress={() => setStap('buurt')}
+                  accessible
+                  accessibilityRole="button"
+                  accessibilityLabel="Zoek in de buurt"
+                >
+                  <Text style={styles.keuzeIcoon}>📍</Text>
+                  <View style={styles.keuzeTekstBlok}>
+                    <Text style={styles.keuzeTitel}>Zoek in de buurt</Text>
+                    <Text style={styles.keuzeUitleg}>
+                      Vind mensen bij u in de buurt die hun profiel openbaar hebben.
+                    </Text>
+                  </View>
+                </TouchableOpacity>
+              </>
+            )}
+
+            {stap === 'nummer' && (
+              <>
+                <Text style={styles.modalUitleg}>
                   Voeg een contact toe door hun mobiele nummer in te vullen.
                 </Text>
-
                 <TextInput
                   style={styles.invoerVeld}
                   placeholder="06 1234 5678"
@@ -406,7 +364,6 @@ export default function ContactenScreen() {
                   accessible
                   accessibilityLabel="Telefoonnummer invoeren"
                 />
-
                 <TouchableOpacity
                   style={[
                     styles.zoekKnop,
@@ -423,19 +380,21 @@ export default function ContactenScreen() {
                     {isZoeken ? 'Zoeken...' : 'Zoek op nummer'}
                   </Text>
                 </TouchableOpacity>
-              </View>
+                <TouchableOpacity
+                  style={styles.terugKnop}
+                  activeOpacity={0.7}
+                  onPress={() => setStap('keuze')}
+                  accessible
+                  accessibilityRole="button"
+                  accessibilityLabel="Terug naar keuzes"
+                >
+                  <Text style={styles.terugKnopTekst}>← Terug</Text>
+                </TouchableOpacity>
+              </>
+            )}
 
-              {/* Scheidingslijn */}
-              <View style={styles.scheiding}>
-                <View style={styles.scheidingsLijn} />
-                <Text style={styles.scheidingsTekst}>OF</Text>
-                <View style={styles.scheidingsLijn} />
-              </View>
-
-              {/* Zoek in de buurt */}
-              <View style={styles.card}>
-                <Text style={styles.sectieKaartTitel}>Zoek in de buurt</Text>
-
+            {stap === 'buurt' && (
+              <>
                 <Text style={styles.veldLabel}>Uw postcode</Text>
                 <TextInput
                   style={styles.invoerVeld}
@@ -448,7 +407,6 @@ export default function ContactenScreen() {
                   accessibilityLabel="Postcode invoeren"
                 />
 
-                {/* Schuifbalk */}
                 <Text style={styles.afstandLabel}>
                   Zoek binnen:{' '}
                   <Text style={styles.afstandWaarde}>
@@ -493,22 +451,529 @@ export default function ContactenScreen() {
                 >
                   <Text style={styles.zoekKnopTekst}>Zoek in de buurt</Text>
                 </TouchableOpacity>
-              </View>
 
-              {/* Disclaimer */}
-              <View style={styles.disclaimerBlok}>
-                <Text style={styles.disclaimerTekst}>
-                  U ziet hier alleen personen die hun profiel op Openbaar hebben gezet.
-                </Text>
-              </View>
+                <View style={styles.disclaimerBlok}>
+                  <Text style={styles.disclaimerTekst}>
+                    U ziet hier alleen personen die hun profiel op Openbaar hebben gezet.
+                  </Text>
+                </View>
 
-              <View style={{ height: 20 }} />
+                <TouchableOpacity
+                  style={styles.terugKnop}
+                  activeOpacity={0.7}
+                  onPress={() => setStap('keuze')}
+                  accessible
+                  accessibilityRole="button"
+                  accessibilityLabel="Terug naar keuzes"
+                >
+                  <Text style={styles.terugKnopTekst}>← Terug</Text>
+                </TouchableOpacity>
+              </>
+            )}
+          </ScrollView>
+        </View>
+      </View>
+    </Modal>
+  );
+}
+
+// --- Verzonden verzoeken (inklapbaar onderaan) ---
+function VerzondenVerzoeken({ verzoeken, isOpen, setIsOpen }) {
+  if (!verzoeken || verzoeken.length === 0) return null;
+
+  return (
+    <View style={styles.verzoekenBlok}>
+      <TouchableOpacity
+        style={styles.verzoekenKop}
+        activeOpacity={0.7}
+        onPress={() => setIsOpen(!isOpen)}
+        accessible
+        accessibilityRole="button"
+        accessibilityState={{ expanded: isOpen }}
+        accessibilityLabel={`${verzoeken.length} uitnodiging verstuurd, ${isOpen ? 'inklappen' : 'uitklappen'}`}
+      >
+        <Text style={styles.verzoekenKopTekst}>
+          ✉️ {verzoeken.length} uitnodiging verstuurd
+        </Text>
+        <Text style={styles.verzoekenPijl}>{isOpen ? '▴' : '▾'}</Text>
+      </TouchableOpacity>
+
+      {isOpen && (
+        <View style={styles.verzoekenLijst}>
+          {verzoeken.map((v) => (
+            <View key={v.id} style={styles.verzoekRij}>
+              <Text style={styles.verzoekNaam}>{v.naam}</Text>
+              <Text style={styles.verzoekStatus}>{v.status}...</Text>
             </View>
-          }
+          ))}
+        </View>
+      )}
+    </View>
+  );
+}
+
+// --- Modal: Contact bewerken ---
+function BewerkContactModal({ contact, onSluit, onOpslaan, onVerwijder }) {
+  const [naam, setNaam] = useState('');
+  const [telefoon, setTelefoon] = useState('');
+  const [categorie, setCategorie] = useState(CATEGORIEEN[0]);
+  const [naamNoodcontact, setNaamNoodcontact] = useState('');
+  const [noodnummer, setNoodnummer] = useState('');
+  const [bezig, setBezig] = useState(false);
+
+  // Velden vullen wanneer een contact wordt geopend
+  useEffect(() => {
+    if (contact) {
+      setNaam(contact.naam || '');
+      setTelefoon(contact.telefoon || '');
+      setCategorie(contact.categorie || CATEGORIEEN[0]);
+      setNaamNoodcontact(contact.naam_noodcontact || '');
+      setNoodnummer(contact.noodnummer || '');
+      setBezig(false);
+    }
+  }, [contact]);
+
+  if (!contact) return null;
+
+  async function opslaan() {
+    if (!naam.trim() || bezig) return;
+    setBezig(true);
+    try {
+      await onOpslaan(contact.id, {
+        naam: naam.trim(),
+        telefoon: telefoon.trim(),
+        categorie,
+        naam_noodcontact: naamNoodcontact.trim(),
+        noodnummer: noodnummer.trim(),
+      });
+      onSluit();
+    } catch (e) {
+      Alert.alert('Opslaan mislukt', 'Probeer het later opnieuw.');
+    } finally {
+      setBezig(false);
+    }
+  }
+
+  function bevestigVerwijder() {
+    Alert.alert(
+      'Contact verwijderen',
+      `Weet u zeker dat u ${contact.naam} wilt verwijderen?`,
+      [
+        { text: 'Annuleren', style: 'cancel' },
+        {
+          text: 'Verwijderen',
+          style: 'destructive',
+          onPress: async () => {
+            setBezig(true);
+            try {
+              await onVerwijder(contact.id);
+              onSluit();
+            } catch (e) {
+              Alert.alert('Verwijderen mislukt', 'Probeer het later opnieuw.');
+            } finally {
+              setBezig(false);
+            }
+          },
+        },
+      ]
+    );
+  }
+
+  return (
+    <Modal
+      visible={!!contact}
+      animationType="slide"
+      transparent
+      onRequestClose={onSluit}
+    >
+      <View style={styles.modalAchtergrond}>
+        <View style={styles.modalVel}>
+          <View style={styles.modalKop}>
+            <Text style={styles.modalTitel}>Contact bewerken</Text>
+            <TouchableOpacity
+              onPress={onSluit}
+              accessible
+              accessibilityRole="button"
+              accessibilityLabel="Sluiten"
+              hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
+            >
+              <Text style={styles.modalSluitTekst}>✕</Text>
+            </TouchableOpacity>
+          </View>
+
+          <ScrollView contentContainerStyle={styles.modalInhoud}>
+            <Text style={styles.veldLabel}>Naam</Text>
+            <TextInput
+              style={styles.invoerVeld}
+              value={naam}
+              onChangeText={setNaam}
+              placeholder="Voor- en achternaam"
+              placeholderTextColor="#B0B0B0"
+              accessible
+              accessibilityLabel="Naam"
+            />
+
+            <Text style={styles.veldLabel}>Telefoonnummer</Text>
+            <TextInput
+              style={styles.invoerVeld}
+              value={telefoon}
+              onChangeText={setTelefoon}
+              placeholder="06 1234 5678"
+              placeholderTextColor="#B0B0B0"
+              keyboardType="phone-pad"
+              accessible
+              accessibilityLabel="Telefoonnummer"
+            />
+
+            <Text style={styles.veldLabel}>Categorie</Text>
+            <View style={styles.categorieKeuze}>
+              {CATEGORIEEN.map((cat) => {
+                const actief = categorie === cat;
+                return (
+                  <TouchableOpacity
+                    key={cat}
+                    style={[styles.categorieOptie, actief && styles.categorieOptieActief]}
+                    activeOpacity={0.7}
+                    onPress={() => setCategorie(cat)}
+                    accessible
+                    accessibilityRole="button"
+                    accessibilityState={{ selected: actief }}
+                    accessibilityLabel={`Categorie ${cat}`}
+                  >
+                    <Text style={[styles.categorieOptieTekst, actief && styles.categorieOptieTekstActief]}>
+                      {cat}
+                    </Text>
+                  </TouchableOpacity>
+                );
+              })}
+            </View>
+
+            <Text style={styles.veldLabel}>Naam noodcontact (optioneel)</Text>
+            <TextInput
+              style={styles.invoerVeld}
+              value={naamNoodcontact}
+              onChangeText={setNaamNoodcontact}
+              placeholder="Bijv. Huisarts De Groot"
+              placeholderTextColor="#B0B0B0"
+              accessible
+              accessibilityLabel="Naam noodcontact"
+            />
+
+            <Text style={styles.veldLabel}>Noodnummer (optioneel)</Text>
+            <TextInput
+              style={styles.invoerVeld}
+              value={noodnummer}
+              onChangeText={setNoodnummer}
+              placeholder="06 1234 5678"
+              placeholderTextColor="#B0B0B0"
+              keyboardType="phone-pad"
+              accessible
+              accessibilityLabel="Noodnummer"
+            />
+
+            <TouchableOpacity
+              style={[styles.zoekKnop, (!naam.trim() || bezig) && styles.knopDisabled]}
+              activeOpacity={0.7}
+              onPress={opslaan}
+              disabled={!naam.trim() || bezig}
+              accessible
+              accessibilityRole="button"
+              accessibilityLabel="Opslaan"
+            >
+              <Text style={styles.zoekKnopTekst}>
+                {bezig ? 'Opslaan...' : 'Opslaan'}
+              </Text>
+            </TouchableOpacity>
+
+            <TouchableOpacity
+              style={styles.verwijderKnop}
+              activeOpacity={0.7}
+              onPress={bevestigVerwijder}
+              disabled={bezig}
+              accessible
+              accessibilityRole="button"
+              accessibilityLabel="Contact verwijderen"
+            >
+              <Text style={styles.verwijderKnopTekst}>🗑️ Contact verwijderen</Text>
+            </TouchableOpacity>
+          </ScrollView>
+        </View>
+      </View>
+    </Modal>
+  );
+}
+
+// --- Hoofdscherm ---
+export default function ContactenScreen() {
+  const [contacten, setContacten] = useState([]);
+  const [isLaden, setIsLaden] = useState(true);
+  const [actieveCategorie, setActieveCategorie] = useState('Alle');
+
+  // Modal-state
+  const [modalZichtbaar, setModalZichtbaar] = useState(false);
+  const [modalStap, setModalStap] = useState('keuze');
+
+  // Verzonden verzoeken
+  const [verzoeken, setVerzoeken] = useState([]);
+  const [verzoekenOpen, setVerzoekenOpen] = useState(false);
+
+  // Bewerken
+  const [bewerkContact, setBewerkContact] = useState(null);
+
+  // Zoek-state
+  const [zoekNummer, setZoekNummer] = useState('');
+  const [isZoeken, setIsZoeken] = useState(false);
+  const [postcode, setPostcode] = useState('');
+  const [afstandIndex, setAfstandIndex] = useState(3);
+
+  // Real-time contacten ophalen via onSnapshot
+  useEffect(() => {
+    const user = auth.currentUser;
+    if (!user) {
+      setContacten(FALLBACK_CONTACTEN);
+      setVerzoeken(FALLBACK_VERZOEKEN);
+      setIsLaden(false);
+      return;
+    }
+
+    let geladen = false;
+    const timeout = setTimeout(() => {
+      if (!geladen) {
+        geladen = true;
+        setContacten(FALLBACK_CONTACTEN);
+        setIsLaden(false);
+      }
+    }, 4000);
+
+    const contactenRef = collection(db, 'profiles', user.uid, 'contacten');
+    const unsubscribeContacten = onSnapshot(
+      contactenRef,
+      (snapshot) => {
+        if (!geladen) {
+          geladen = true;
+          clearTimeout(timeout);
+          setIsLaden(false);
+        }
+        const data = snapshot.docs.map((d) => ({ id: d.id, ...d.data() }));
+        setContacten(data.length > 0 ? data : FALLBACK_CONTACTEN);
+      },
+      (err) => {
+        if (geladen) return;
+        geladen = true;
+        clearTimeout(timeout);
+        console.warn('Contacten laden mislukt:', err);
+        setContacten(FALLBACK_CONTACTEN);
+        setIsLaden(false);
+      }
+    );
+
+    // Verzonden verzoeken: openstaande uitnodigingen die de gebruiker heeft verstuurd
+    let verzoekenQuery;
+    try {
+      verzoekenQuery = query(
+        collection(db, 'profiles', user.uid, 'verzoeken'),
+        orderBy('aangemaakt', 'desc')
+      );
+    } catch {
+      verzoekenQuery = collection(db, 'profiles', user.uid, 'verzoeken');
+    }
+    const unsubscribeVerzoeken = onSnapshot(
+      verzoekenQuery,
+      (snapshot) => {
+        const data = snapshot.docs
+          .map((d) => ({ id: d.id, ...d.data() }))
+          .filter((v) => !v.status || v.status === 'wacht' || v.status === 'Wacht op reactie');
+        setVerzoeken(data);
+      },
+      (err) => {
+        console.warn('Verzoeken laden mislukt:', err);
+        // Bij fout (bijv. collectie bestaat nog niet) tonen we niets in plaats van dummy data
+        setVerzoeken([]);
+      }
+    );
+
+    return () => {
+      clearTimeout(timeout);
+      unsubscribeContacten();
+      unsubscribeVerzoeken();
+    };
+  }, []);
+
+  const categorieen = ['Alle', ...CATEGORIEEN];
+  const toonCategorieFilter = contacten.length >= TOON_FILTER_VANAF;
+
+  const gefilterdeContacten = (!toonCategorieFilter || actieveCategorie === 'Alle')
+    ? contacten
+    : contacten.filter((c) => c.categorie === actieveCategorie);
+
+  function toggleDeelInstelling(contactId, veld, waarde) {
+    setContacten((prev) =>
+      prev.map((c) => (c.id === contactId ? { ...c, [veld]: waarde } : c))
+    );
+  }
+
+  async function nodigUit() {
+    try {
+      await Share.share({
+        message:
+          'Hoi! Ik gebruik de Samen-app om in contact te blijven met de buurt. Doe je ook mee? Download hem hier: [URL_KOMT_LATER]',
+      });
+    } catch (e) {
+      console.warn('Delen mislukt:', e);
+    }
+  }
+
+  function zoekOpNummer() {
+    if (!zoekNummer.trim() || isZoeken) return;
+    setIsZoeken(true);
+    setTimeout(() => {
+      Alert.alert(
+        'Niet gevonden',
+        'Dit nummer is nog niet bekend bij DAG. Vraag uw contactpersoon om eerst de gratis app te downloaden.'
+      );
+      setIsZoeken(false);
+    }, 800);
+  }
+
+  function openVoegToe() {
+    setModalStap('keuze');
+    setModalZichtbaar(true);
+  }
+
+  function sluitVoegToe() {
+    setModalZichtbaar(false);
+    setModalStap('keuze');
+  }
+
+  function onBewerken(contact) {
+    setBewerkContact(contact);
+  }
+
+  async function slaContactOp(contactId, velden) {
+    // Lokale update direct toepassen (zodat de UI snel reageert, ook bij fallback)
+    setContacten((prev) =>
+      prev.map((c) => (c.id === contactId ? { ...c, ...velden } : c))
+    );
+
+    const user = auth.currentUser;
+    if (!user) return;
+    await updateDoc(doc(db, 'profiles', user.uid, 'contacten', contactId), velden);
+  }
+
+  async function verwijderContact(contactId) {
+    setContacten((prev) => prev.filter((c) => c.id !== contactId));
+
+    const user = auth.currentUser;
+    if (!user) return;
+    await deleteDoc(doc(db, 'profiles', user.uid, 'contacten', contactId));
+  }
+
+  return (
+    <View style={styles.scherm}>
+      {/* Kop met titel + plusknop */}
+      <View style={styles.kopBalk}>
+        <Text style={styles.kopTitel}>Mijn contacten</Text>
+        <TouchableOpacity
+          style={styles.plusKnop}
+          activeOpacity={0.7}
+          onPress={openVoegToe}
+          accessible
+          accessibilityRole="button"
+          accessibilityLabel="Contact toevoegen"
+        >
+          <Text style={styles.plusKnopTekst}>+ Toevoegen</Text>
+        </TouchableOpacity>
+      </View>
+
+      {/* Lijst of laadscherm */}
+      {isLaden ? (
+        <View style={styles.laadScherm}>
+          <ActivityIndicator size="large" color={TEAL} />
+          <Text style={styles.laadTekst}>Contacten laden...</Text>
+        </View>
+      ) : (
+        <FlatList
+          data={gefilterdeContacten}
+          keyExtractor={(item) => item.id}
+          renderItem={({ item }) => (
+            <ContactCard
+              contact={item}
+              onToggle={toggleDeelInstelling}
+              onBewerken={onBewerken}
+            />
+          )}
           contentContainerStyle={styles.lijstContent}
           showsVerticalScrollIndicator={false}
+          ListHeaderComponent={
+            toonCategorieFilter ? (
+              <ScrollView
+                horizontal
+                showsHorizontalScrollIndicator={false}
+                style={styles.filterScroll}
+                contentContainerStyle={styles.filterContent}
+              >
+                {categorieen.map((cat) => (
+                  <TouchableOpacity
+                    key={cat}
+                    style={[styles.filterPill, actieveCategorie === cat && styles.filterPillActief]}
+                    activeOpacity={0.7}
+                    onPress={() => setActieveCategorie(cat)}
+                    accessible
+                    accessibilityRole="button"
+                    accessibilityState={{ selected: actieveCategorie === cat }}
+                    accessibilityLabel={`Filter: ${cat}`}
+                  >
+                    <Text style={[styles.filterPillTekst, actieveCategorie === cat && styles.filterPillTekstActief]}>
+                      {cat}
+                    </Text>
+                  </TouchableOpacity>
+                ))}
+              </ScrollView>
+            ) : null
+          }
+          ListEmptyComponent={
+            <View style={styles.leegBlok}>
+              <Text style={styles.leegTekst}>
+                {toonCategorieFilter
+                  ? 'Geen contacten in deze categorie.'
+                  : 'Nog geen contacten. Tik op + Toevoegen om iemand uit te nodigen.'}
+              </Text>
+            </View>
+          }
+          ListFooterComponent={
+            <VerzondenVerzoeken
+              verzoeken={verzoeken}
+              isOpen={verzoekenOpen}
+              setIsOpen={setVerzoekenOpen}
+            />
+          }
         />
       )}
+
+      {/* Modal: Contact toevoegen */}
+      <VoegContactToeModal
+        zichtbaar={modalZichtbaar}
+        stap={modalStap}
+        setStap={setModalStap}
+        onSluit={sluitVoegToe}
+        onUitnodig={nodigUit}
+        zoekNummer={zoekNummer}
+        setZoekNummer={setZoekNummer}
+        isZoeken={isZoeken}
+        zoekOpNummer={zoekOpNummer}
+        postcode={postcode}
+        setPostcode={setPostcode}
+        afstandIndex={afstandIndex}
+        setAfstandIndex={setAfstandIndex}
+      />
+
+      {/* Modal: Contact bewerken */}
+      <BewerkContactModal
+        contact={bewerkContact}
+        onSluit={() => setBewerkContact(null)}
+        onOpslaan={slaContactOp}
+        onVerwijder={verwijderContact}
+      />
     </View>
   );
 }
@@ -529,67 +994,40 @@ const styles = StyleSheet.create({
     marginTop: 12,
   },
 
-  // Toggle bar
-  toggleBar: {
+  // Kopbalk
+  kopBalk: {
     flexDirection: 'row',
-    marginHorizontal: 20,
-    marginTop: 16,
-    marginBottom: 16,
-    backgroundColor: '#E8E8E2',
-    borderRadius: 14,
-    padding: 4,
-  },
-  toggleKnop: {
-    flex: 1,
-    paddingVertical: 14,
-    borderRadius: 12,
     alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: 20,
+    paddingTop: 16,
+    paddingBottom: 12,
   },
-  toggleActief: {
+  kopTitel: {
+    fontSize: 26,
+    fontWeight: '700',
+    color: '#1A1A1A',
+  },
+  plusKnop: {
     backgroundColor: TEAL,
+    borderRadius: 14,
+    paddingHorizontal: 18,
+    paddingVertical: 12,
     ...schaduw,
   },
-  toggleTekst: {
-    fontSize: 16,
-    fontWeight: '600',
-    color: '#666',
-  },
-  toggleTekstActief: {
-    color: WIT,
+  plusKnopTekst: {
+    fontSize: 17,
     fontWeight: '700',
+    color: WIT,
   },
 
   // Filter pills
-  uitnodigKnop: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: '#E8F5F2',
-    borderRadius: 16,
-    borderWidth: 2,
-    borderColor: TEAL,
-    borderStyle: 'dashed',
-    paddingVertical: 16,
-    paddingHorizontal: 20,
-    marginBottom: 14,
-  },
-  uitnodigIcoon: {
-    fontSize: 24,
-    marginRight: 10,
-  },
-  uitnodigTekst: {
-    fontSize: 18,
-    fontWeight: '700',
-    color: TEAL,
-  },
-
   filterScroll: {
     flexGrow: 0,
     marginBottom: 12,
   },
   filterContent: {
-    paddingHorizontal: 20,
-    paddingVertical: 8,
+    paddingVertical: 4,
     gap: 8,
     alignItems: 'center',
   },
@@ -614,11 +1052,14 @@ const styles = StyleSheet.create({
   leegBlok: {
     alignItems: 'center',
     paddingVertical: 40,
+    paddingHorizontal: 20,
   },
   leegTekst: {
     fontSize: 18,
     color: '#999',
     fontStyle: 'italic',
+    textAlign: 'center',
+    lineHeight: 26,
   },
 
   // Lijst
@@ -632,11 +1073,9 @@ const styles = StyleSheet.create({
     backgroundColor: WIT,
     borderRadius: 16,
     padding: 20,
-    marginBottom: 20,
+    marginBottom: 16,
     ...schaduw,
   },
-
-  // Card waarschuwing
   cardWaarschuwing: {
     borderWidth: 2,
     borderColor: ROOD_ZACHT,
@@ -646,7 +1085,7 @@ const styles = StyleSheet.create({
   contactHeader: {
     flexDirection: 'row',
     alignItems: 'center',
-    marginBottom: 10,
+    marginBottom: 12,
   },
   contactFoto: {
     width: 50,
@@ -656,14 +1095,22 @@ const styles = StyleSheet.create({
     borderWidth: 2,
     borderColor: TEAL,
   },
+  contactNaamBlok: {
+    flex: 1,
+  },
   contactNaam: {
     fontSize: 22,
     fontWeight: '700',
     color: '#1A1A1A',
-    flex: 1,
+  },
+  contactCategorie: {
+    fontSize: 14,
+    color: '#777',
+    marginTop: 2,
   },
   contactMood: {
     fontSize: 24,
+    marginLeft: 8,
   },
 
   // Noodknoppen
@@ -736,11 +1183,43 @@ const styles = StyleSheet.create({
     marginTop: 4,
   },
 
+  // Actieknoppen
+  actieRij: {
+    flexDirection: 'row',
+    gap: 10,
+    marginBottom: 4,
+  },
+  actieKnop: {
+    flex: 1,
+    borderRadius: 12,
+    paddingVertical: 12,
+    alignItems: 'center',
+  },
+  actieKnopPrimair: {
+    backgroundColor: TEAL,
+  },
+  actieKnopSecundair: {
+    backgroundColor: '#F0F0EC',
+    borderWidth: 1,
+    borderColor: '#D8D8D2',
+  },
+  actieKnopTekstPrimair: {
+    fontSize: 17,
+    fontWeight: '700',
+    color: WIT,
+  },
+  actieKnopTekstSecundair: {
+    fontSize: 17,
+    fontWeight: '600',
+    color: '#444',
+  },
+
   // Deel-instellingen
   deelBlok: {
     borderTopWidth: 1,
     borderTopColor: '#F0F0F0',
     paddingTop: 12,
+    marginTop: 12,
   },
   switchRij: {
     flexDirection: 'row',
@@ -765,18 +1244,135 @@ const styles = StyleSheet.create({
     lineHeight: 18,
   },
 
-  // Sectie titels
-  sectieKaartTitel: {
-    fontSize: 24,
+  // Verzonden verzoeken
+  verzoekenBlok: {
+    marginTop: 8,
+    marginBottom: 12,
+    backgroundColor: '#EFEFE9',
+    borderRadius: 12,
+    overflow: 'hidden',
+  },
+  verzoekenKop: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: 16,
+    paddingVertical: 14,
+  },
+  verzoekenKopTekst: {
+    fontSize: 16,
+    fontWeight: '600',
+    color: '#444',
+  },
+  verzoekenPijl: {
+    fontSize: 18,
+    color: '#666',
+  },
+  verzoekenLijst: {
+    paddingHorizontal: 16,
+    paddingBottom: 12,
+    borderTopWidth: 1,
+    borderTopColor: '#DDDCD2',
+  },
+  verzoekRij: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingVertical: 10,
+  },
+  verzoekNaam: {
+    fontSize: 17,
+    fontWeight: '600',
+    color: '#1A1A1A',
+  },
+  verzoekStatus: {
+    fontSize: 15,
+    color: '#888',
+    fontStyle: 'italic',
+  },
+
+  // Modal
+  modalAchtergrond: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.4)',
+    justifyContent: 'flex-end',
+  },
+  modalVel: {
+    backgroundColor: ACHTERGROND,
+    borderTopLeftRadius: 24,
+    borderTopRightRadius: 24,
+    maxHeight: '90%',
+    paddingBottom: 20,
+  },
+  modalKop: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: 20,
+    paddingTop: 20,
+    paddingBottom: 12,
+  },
+  modalTitel: {
+    fontSize: 22,
     fontWeight: '700',
     color: '#1A1A1A',
-    marginBottom: 8,
+    flex: 1,
   },
-  zoekUitleg: {
+  modalSluitTekst: {
+    fontSize: 24,
+    color: '#666',
+    paddingHorizontal: 8,
+  },
+  modalInhoud: {
+    paddingHorizontal: 20,
+    paddingBottom: 30,
+  },
+  modalUitleg: {
     fontSize: 17,
     color: '#666',
     lineHeight: 24,
     marginBottom: 16,
+  },
+
+  // Keuze-knoppen
+  keuzeKnop: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: WIT,
+    borderRadius: 16,
+    padding: 16,
+    marginBottom: 12,
+    ...schaduw,
+  },
+  keuzeIcoon: {
+    fontSize: 32,
+    marginRight: 14,
+  },
+  keuzeTekstBlok: {
+    flex: 1,
+  },
+  keuzeTitel: {
+    fontSize: 18,
+    fontWeight: '700',
+    color: '#1A1A1A',
+    marginBottom: 4,
+  },
+  keuzeUitleg: {
+    fontSize: 14,
+    color: '#666',
+    lineHeight: 20,
+  },
+
+  // Terug-knop binnen modal
+  terugKnop: {
+    alignItems: 'center',
+    paddingVertical: 14,
+    marginTop: 16,
+  },
+  terugKnopTekst: {
+    fontSize: 16,
+    fontWeight: '600',
+    color: TEAL,
   },
 
   // Invoervelden
@@ -787,7 +1383,7 @@ const styles = StyleSheet.create({
     marginBottom: 8,
   },
   invoerVeld: {
-    backgroundColor: ACHTERGROND,
+    backgroundColor: WIT,
     borderWidth: 2,
     borderColor: '#D0D0D0',
     borderRadius: 14,
@@ -814,23 +1410,46 @@ const styles = StyleSheet.create({
     opacity: 0.45,
   },
 
-  // Scheiding
-  scheiding: {
+  // Categorie-keuze (in bewerken-modal)
+  categorieKeuze: {
     flexDirection: 'row',
-    alignItems: 'center',
-    marginVertical: 8,
-    marginBottom: 20,
+    flexWrap: 'wrap',
+    gap: 8,
+    marginBottom: 16,
   },
-  scheidingsLijn: {
-    flex: 1,
-    height: 1,
-    backgroundColor: '#D0D0D0',
+  categorieOptie: {
+    backgroundColor: '#EAEAEA',
+    borderRadius: 20,
+    paddingHorizontal: 14,
+    paddingVertical: 10,
   },
-  scheidingsTekst: {
-    marginHorizontal: 16,
-    fontSize: 16,
-    color: '#999',
+  categorieOptieActief: {
+    backgroundColor: TEAL,
+  },
+  categorieOptieTekst: {
+    fontSize: 15,
+    fontWeight: '600',
+    color: '#555',
+  },
+  categorieOptieTekstActief: {
+    color: WIT,
     fontWeight: '700',
+  },
+
+  // Verwijder-knop (in bewerken-modal)
+  verwijderKnop: {
+    marginTop: 18,
+    paddingVertical: 14,
+    alignItems: 'center',
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: ROOD_ZACHT,
+    backgroundColor: '#FFF6F3',
+  },
+  verwijderKnopTekst: {
+    fontSize: 16,
+    fontWeight: '700',
+    color: ROOD_ZACHT,
   },
 
   // Slider
@@ -865,9 +1484,10 @@ const styles = StyleSheet.create({
     padding: 16,
     borderLeftWidth: 4,
     borderLeftColor: '#FFB300',
+    marginTop: 16,
   },
   disclaimerTekst: {
-    fontSize: 16,
+    fontSize: 15,
     color: '#7A6C00',
     lineHeight: 22,
     fontStyle: 'italic',
